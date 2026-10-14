@@ -1,6 +1,7 @@
 package app
 
 import (
+	"strconv"
 	"bufio"
 	"bytes"
 	"encoding/json"
@@ -44,6 +45,13 @@ const innerSlots = 97
 const (
 	thinkingNormal   = 1
 	thinkingExtended = 2
+
+	// modeArgon 是 4 Argon 在 x-goog-ext-525001261-jspb header 下标 14 的模式值
+	// （CDP 抓包 2026-10-14：登录号在网页端选 4 Argon 发消息，该 header 为
+	// [1,null,null,null,null,null,null,null,[4,5,6,8,16,19,20],null,null,null,
+	//  null,null,8,1,"<uuid>",["boq_…"],…] —— 没有 3.x 那样的模型 hex（下标 4
+	// 为 null），选择完全由模式值 + 特性旗标决定）。
+	modeArgon = 8
 )
 
 // ModelConfig holds the server-side model id plus the legacy MODE_CATEGORY value.
@@ -57,6 +65,9 @@ type ModelConfig struct {
 	// Thinking 为真时填 inner[80]=2，即网页 UI 上的「扩展思考」。跟 HexID 正交
 	// —— 三个模型都能开，不是某个专属模型。
 	Thinking bool
+	// HeaderFlags 覆盖 header 下标 8 的特性旗标数组。3.x 模型固定 [4,5,6,8]；
+	// 4 Argon 需要 [4,5,6,8,16,19,20]，且没有 HexID（见 modeArgon 注释）。
+	HeaderFlags []int
 	// Tool 非 0 时填 inner[49]，让服务端换后端模型生成媒体产物（14=生图 Nano Banana
 	// / 21=音乐 Lyria）。产物不在 StreamGenerate 响应里，要再走 hNvQHb 拿下载链、
 	// 用下载 host 认的 cookie 子集下回原始字节，见 media.go。跟登录态绑定：匿名请求
@@ -86,6 +97,12 @@ var Models = map[string]ModelConfig{
 	"gemini-3.8-flash-thinking":      {HexID: hexFlash38, Mode: 1, Thinking: true, Desc: "3.8 Flash with extended thinking; needs a signed-in cookie"},
 	"gemini-3.7-flash-thinking":      {HexID: hexFlash38, Mode: 1, Thinking: true, Desc: "alias of gemini-3.8-flash-thinking"},
 
+	// 4 Argon（2026-10 上线，选择器显示名「4 Argon」、定位「复杂任务」）。
+	// 无模型 hex，选择走 modeArgon + HeaderFlags（见上方注释）；实测登录号
+	// 发消息自报 "Gemini 4 Argon"。要登录态。
+	"gemini-4-argon":          {Mode: modeArgon, HeaderFlags: []int{4, 5, 6, 8, 16, 19, 20}, Desc: "4 Argon; most capable, complex tasks; needs a signed-in cookie"},
+	"gemini-4-argon-thinking": {Mode: modeArgon, HeaderFlags: []int{4, 5, 6, 8, 16, 19, 20}, Thinking: true, Desc: "4 Argon with extended thinking; needs a signed-in cookie"},
+
 	// 媒体生成。inner[49] 一填，服务端换后端模型出图/出乐；产物走 hNvQHb + 下载 host
 	// 取回，以 base64 data URL 塞进 content 返回。都要登录态，没 cookie 时不暴露。
 	"gemini-image": {HexID: hexFlash36, Mode: 1, Tool: toolImage, Desc: "Image generation (Nano Banana); returns a base64 data URL; needs a signed-in cookie"},
@@ -110,7 +127,7 @@ func hasCookie() bool {
 // 逐模型核对等价：那三个正名的 HexID 就是 hexPro31 / hexFlash38，其余登录模型都被
 // Thinking 或 Tool 覆盖。
 func modelNeedsLogin(mc ModelConfig) bool {
-	return mc.HexID == hexPro31 || mc.HexID == hexFlash38 || mc.Thinking || mc.Tool > 0
+	return mc.HexID == hexPro31 || mc.HexID == hexFlash38 || mc.Thinking || mc.Tool > 0 || mc.Mode == modeArgon
 }
 
 // anonFirstEligible 判断「匿名优先」开关下这次请求能不能走匿名（不占 cookie 账号）：
@@ -570,7 +587,7 @@ func streamGenerateWithFiles(prompt, latest string, mc ModelConfig, pending []pe
 		thinkVal = thinkingExtended
 	}
 	// 抓包里 header 下标 16 和 inner[59] 是两个不同的 uuid，各生成各的。
-	modelHeader := buildModelHeader(mc.HexID, mc.Mode, thinkVal, uuid.NewString())
+	modelHeader := buildModelHeader(mc, thinkVal, uuid.NewString())
 	sessionHeader := fmt.Sprintf(`["%s",1]`, reqUUID)
 
 	geminiHeaders := buildGeminiHeaders(cookieStr, sapisid, mc.HexID)
@@ -763,13 +780,32 @@ func extractUpstreamModel(raw string) string {
 // x-goog-ext-525005358-jspb。两份抓包都是这个规律，别图省事复用同一个。
 //
 // uuid 留空时退回最小形式（匿名路径不需要这些槽位，少发一截更省事）。
-func buildModelHeader(hexID string, mode, think int, uuid string) string {
+func buildModelHeader(mc ModelConfig, think int, uuid string) string {
+	if mc.HexID == "" && mc.Mode == modeArgon {
+		// 4 Argon 形状（对齐浏览器抓包）：下标 4 无 hex、下标 8 用加长旗标、
+		// 下标 14 是模式值 8。
+		return fmt.Sprintf(
+			`[1,null,null,null,null,null,null,null,%s,null,null,null,null,null,%d,%d,"%s"]`,
+			flagsJSON(mc.HeaderFlags), mc.Mode, think, uuid)
+	}
 	if uuid == "" {
-		return fmt.Sprintf(`[1,null,null,null,"%s"]`, hexID)
+		return fmt.Sprintf(`[1,null,null,null,"%s"]`, mc.HexID)
 	}
 	return fmt.Sprintf(
 		`[1,null,null,null,"%s",null,null,0,[4,5,6,8],null,null,1,null,null,%d,%d,"%s"]`,
-		hexID, mode, think, uuid)
+		mc.HexID, mc.Mode, think, uuid)
+}
+
+// flagsJSON 把特性旗标序列化成 JSON 数组字面量（空则回落 3.x 的 [4,5,6,8]）。
+func flagsJSON(flags []int) string {
+	if len(flags) == 0 {
+		return "[4,5,6,8]"
+	}
+	parts := make([]string, len(flags))
+	for i, f := range flags {
+		parts[i] = strconv.Itoa(f)
+	}
+	return "[" + strings.Join(parts, ",") + "]"
 }
 
 // buildGeminiHeaders 准备 StreamGenerate 必需的应用层 header。
@@ -788,7 +824,7 @@ func buildGeminiHeaders(cookieStr, sapisid, hexID string) map[string]string {
 		"x-goog-ext-73010990-jspb": "[0,0,0]",
 	}
 	if hexID != "" {
-		h["x-goog-ext-525001261-jspb"] = buildModelHeader(hexID, 0, 0, "")
+		h["x-goog-ext-525001261-jspb"] = buildModelHeader(ModelConfig{HexID: hexID}, 0, "")
 	}
 	if cookieStr != "" {
 		h["Cookie"] = cookieStr

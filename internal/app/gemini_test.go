@@ -53,10 +53,29 @@ func TestModelHeader(t *testing.T) {
 	// 不是条目数。服务端清单（otAQ7b）里 3.6/3.5-lite/3.1-pro + 灰度放出的 3.7 = 4 个。
 	hexes := map[string]bool{}
 	for _, m := range Models {
-		hexes[m.HexID] = true
+		if m.HexID != "" { // 4 Argon 这类新一代模型没有 hex，不计入
+			hexes[m.HexID] = true
+		}
 	}
 	if len(hexes) != 4 {
 		t.Errorf("只应存在 4 个真模型 hex, got %d", len(hexes))
+	}
+
+	// 4 Argon：无 hex、模式 8、加长旗标；header 形状对齐浏览器抓包。
+	name, mc, err = resolveModel("gemini-4-argon") // 复用函数作用域里已声明的变量
+	if err != nil {
+		t.Fatalf("gemini-4-argon: %v", err)
+	}
+	if mc.HexID != "" || mc.Mode != modeArgon || len(mc.HeaderFlags) != 7 {
+		t.Errorf("argon config: hex=%q mode=%d flags=%v", mc.HexID, mc.Mode, mc.HeaderFlags)
+	}
+	got := buildModelHeader(mc, thinkingNormal, "UUID-X")
+	want := `[1,null,null,null,null,null,null,null,[4,5,6,8,16,19,20],null,null,null,null,null,8,1,"UUID-X"]`
+	if got != want {
+		t.Errorf("argon header=%s want %s", got, want)
+	}
+	if _, mcT, err := resolveModel("gemini-4-argon-thinking"); err != nil || !mcT.Thinking {
+		t.Errorf("gemini-4-argon-thinking 应存在且 Thinking=true, err=%v", err)
 	}
 	// 反过来：每个真 hex 都应该有一个 thinking 版
 	for _, base := range []string{hexFlash36, hexFlashLite, hexPro31, hexFlash38} {
