@@ -102,8 +102,18 @@ func buildPrompt(messages []map[string]interface{}, tools []map[string]interface
 					"and nothing else — do not answer the question yourself, even if you " +
 					"know the answer."
 			}
+			// 执行者框定：模型拒答的头号成因是它以为自己得**亲自**去访问用户的机器
+			// （工具描述里满是 "in the user's project directory" 这类字眼），于是答一句
+			// 「我无法访问你的本地文件系统」收尾。必须明说：工具由发请求的客户端程序在
+			// 用户机器上代为执行，模型只负责把调用块写出来。这句话要紧挨着工具清单放
+			// （近因），放系统提示开头没用——实测隔着几百字节就形同没说。
+			// 措辞动过七版都没压住拒答，唯独这一句是冲着成因去的，实测命中率有提升。
 			parts = append(parts, fmt.Sprintf(
 				"[System instruction]: You have access to tools. "+
+					"The tools are executed by the client program on the user's machine — "+
+					"never by you. You do not need access to any machine, filesystem, or "+
+					"terminal: to run one, just emit its tool_call block, and the client "+
+					"will run it and send you the output in the next message.\n"+
 					"To call a tool, respond with:\n"+
 					"```tool_call\n{\"name\": \"func_name\", \"arguments\": {...}}\n```\n"+
 					"%s\n\n"+
