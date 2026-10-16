@@ -634,7 +634,17 @@ func handleAdminConfig(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	case http.MethodPut:
-		var next RuntimeConfig
+		// 从当前配置开始，再把 body 里的字段盖上去 —— **不能**直接 Decode 到一个零值
+		// RuntimeConfig 上。
+		//
+		// 原因：body 是「整结构」语义，而前端 saveRtCfg 只按 RT_GROUPS 拼字段。两边一旦
+		// 不同步（新加了字段忘了进 RT_GROUPS），缺失的字段就被解成零值冲掉 —— #27 里
+		// multi_turn 就这么被静默重置过，config.json 里设的值都白设。这种 bug 不报错、
+		// 只表现为「设了不管用」，排查成本极高。
+		//
+		// 盖在当前值之上后，缺字段 = 不改，语义变成真正的部分更新：面板照旧工作，
+		// 手改 API 的人也不会误伤其他字段。
+		next := rtCfg()
 		if err := json.NewDecoder(r.Body).Decode(&next); err != nil {
 			writeJSON(w, 400, map[string]string{"error": "invalid JSON: " + err.Error()})
 			return

@@ -129,53 +129,90 @@ func rejectUnsupported(req map[string]interface{}, messages []map[string]interfa
 	return nil
 }
 
-func callGemini(prompt, latest string, mc ModelConfig, tools []map[string]interface{},
-	images []pendingUpload, onDelta, onReasoning func(string)) (string, []ToolCall, *StreamResult, error) {
-	res, err := streamGenerateWithFiles(prompt, latest, mc, images, onDelta, onReasoning)
-	if err != nil {
-		// res 非 nil：失败时它只带归属（哪个号 / 哪个出口），给 recordRequest 用
-		return "", nil, res, err
-	}
-	text := extractResponseText(res.Raw)
+// interpretResponse 把上游响应正文翻译成本次调用的返回值。
+//
+// 从 callGemini 里抽出来是为了让拒答重放能复用同一份判定：重放前后的「正文长什么样、
+// 该不该报错」完全一致，只有「要不要再试一次」不同（在 callGemini 里判）。
+func interpretResponse(raw string, mc ModelConfig, tools []map[string]interface{}) (string, []ToolCall, error) {
+	text := extractResponseText(raw)
 	// 画布：HTML 文档内联在响应里（不像图/乐要下载），从 immersive 结构里抠出来。
 	// 标准文本提取只拿到 preamble（"I will generate…"），文档在 inner[4][0][30]…，
 	// 用 extractCanvasDoc 单独取。
 	if mc.Tool == toolCanvas {
-		doc := extractCanvasDoc(res.Raw)
+		doc := extractCanvasDoc(raw)
 		if doc == "" {
-			return "", nil, res, fmt.Errorf("canvas generation failed: no HTML document in response (raw %d bytes)", len(res.Raw))
+			return "", nil, fmt.Errorf("canvas generation failed: no HTML document in response (raw %d bytes)", len(raw))
 		}
 		if text != "" && !strings.Contains(doc, text) {
-			return text + "\n\n" + doc, nil, res, nil // preamble + 文档
+			return text + "\n\n" + doc, nil, nil // preamble + 文档
 		}
-		return doc, nil, res, nil
+		return doc, nil, nil
 	}
-	// 媒体模型（生图/音乐）：生成 200 了但产物字节没取回来，直接报错而不是返回一个
-	// 只有文字没有图的半成品 —— 客户端要的就是那张图/那段乐。
-	if mc.Tool == toolImage || mc.Tool == toolMusic || mc.Tool == toolVideo {
-		if len(res.Artifacts) == 0 {
-			msg := res.MediaErr
-			if msg == "" {
-				msg = "媒体产物取回失败"
-			}
-			return "", nil, res, fmt.Errorf("media generation succeeded but artifact retrieval failed: %s", msg)
-		}
-		// 产物以 base64 data URL 追加到正文（可能没正文，只有图/乐/视频）。
-		text = appendArtifactMarkdown(text, res.Artifacts)
-		return text, nil, res, nil
-	}
-	if text == "" {
+	// 媒体模型（生图/音乐）：产物字节能不能取到在这里判不了（要看 res.Artifacts），
+	// 所以只跳过「空正文报错」和工具解析 —— 这两件事对媒体模型都不适用，原实现也是
+	// 在媒体分支直接 return 的。
+	isMedia := mc.Tool == toolImage || mc.Tool == toolMusic || mc.Tool == toolVideo
+	if text == "" && !isMedia {
 		// 上游拒绝时只回一个结束帧、没有内容帧（实测被拒时 raw 仅 216
 		// 字节）。这种情况必须报错：以前会当成空回复返回 200 + content:null，
 		// 客户端看不出请求其实失败了。
 		// 注意不能用 BardErrorInfo 判错 —— 正常响应的结束帧里也带这个码。
-		return "", nil, res, fmt.Errorf("upstream returned no content frame (raw %d bytes)", len(res.Raw))
+		return "", nil, fmt.Errorf("upstream returned no content frame (raw %d bytes)", len(raw))
 	}
 	var toolCalls []ToolCall
-	if len(tools) > 0 {
+	if len(tools) > 0 && !isMedia {
 		text, toolCalls = parseToolCalls(text)
 	}
-	return text, toolCalls, res, nil
+	return text, toolCalls, nil
+}
+
+// callGemini 发一次（最多两次：拒答时重放）请求并翻译结果。
+//
+// guard 非 nil 且本轮「一个字节都还没发给客户端」时，正文被判为能力拒答就会**丢掉**
+// 第一次的正文、带上纠偏说明重发一次（见 toolrefusal.go）。第一次的内容既然一个字节没
+// 出去过，丢掉它就不会让客户端看到「我无法访问您的本地文件系统」+ 一个 tool_call 的
+// 自相矛盾输出。
+//
+// 重放次数结构上是 1：guard.Drop() 之后 HeldAll() 恒为 false，重放在这里只可能发生一次。
+func callGemini(prompt, latest string, mc ModelConfig, tools []map[string]interface{},
+	images []pendingUpload, onDelta, onReasoning func(string), guard *refusalGuard) (string, []ToolCall, *StreamResult, error) {
+	// tail 而不是改 prompt：纠偏说明必须落在正文最末尾（近因效应），而 prompt 可能在
+	// streamGenerateWithFiles 里被换成附件指路说明；同时 prompt 本身保持不变，
+	// 调用方的 recordRequest / 用量统计口径不受重放影响。
+	tail := ""
+	for {
+		res, err := streamGenerateWithFiles(prompt, latest, mc, images, onDelta, onReasoning, tail)
+		if err != nil {
+			// res 非 nil：失败时它只带归属（哪个号 / 哪个出口），给 recordRequest 用。
+			// 不 Release：这次请求是失败的，客户端会收到 Fail，再补一段半截正文只会更乱。
+			return "", nil, res, err
+		}
+		text, toolCalls, err := interpretResponse(res.Raw, mc, tools)
+		if err != nil {
+			return "", nil, res, err
+		}
+		// 媒体产物在这里补（要读 res.Artifacts，interpretResponse 拿不到）。
+		if mc.Tool == toolImage || mc.Tool == toolMusic || mc.Tool == toolVideo {
+			if len(res.Artifacts) == 0 {
+				msg := res.MediaErr
+				if msg == "" {
+					msg = "媒体产物取回失败"
+				}
+				return "", nil, res, fmt.Errorf("media generation succeeded but artifact retrieval failed: %s", msg)
+			}
+			text = appendArtifactMarkdown(text, res.Artifacts)
+		}
+		if mayReplayRefusal(text, len(tools), len(images), mc.Tool, guard) {
+			logf("[toolrefusal] 模型拒答未调工具（%d 字节），丢弃本轮正文并重放一次：%s",
+				len(text), sanitizeForLog(text, 120))
+			guard.Drop()
+			tail = toolRefusalNudgeFor(toolRefusalNameList(tools))
+			continue
+		}
+		// 正常结束：把扣住的增量按原顺序补发（可能早就 Release 过了，幂等）。
+		guard.Release()
+		return text, toolCalls, res, nil
+	}
 }
 
 // recordRequest writes one row of metadata to the requests table.
@@ -299,14 +336,29 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 拒答闸门：扣住开头一小段，用来判「这轮是不是在推脱、压根没打算调工具」；
+	// 判是就整轮丢掉重发（见 callGemini / toolrefusal.go）。位置在围栏闸门**之前** ——
+	// 先看到原始增量，才能靠 ```tool_call 后缀立刻放行。
+	//
+	// 只在 callGemini 这条路上挂。判据里必须含 !useConv：guard 是「扣住等判决」，
+	// 而 callGeminiConv 自己管续接、不会去动 guard，一旦挂上就永远不放行 —— 表现是
+	// 200 但正文一个字都没有（静默黑屏），比拒答本身难查得多。
+	useConv := useConvPath(len(images), modelCfg.Tool)
+	var guard *refusalGuard
+	if shouldGuardRefusal(tools, modelCfg.Tool, useConv) {
+		guard = newRefusalGuard(onDelta, onReasoning)
+		onDelta, onReasoning = guard.contentCallback(), guard.reasoningCallback()
+	}
+
 	var text string
 	var toolCalls []ToolCall
 	var res *StreamResult
-	if rtCfg().MultiTurn && len(images) == 0 && modelCfg.Tool == 0 {
+	if useConv {
 		// 多轮：按历史前缀识别续接，命中就只发新消息、历史留服务端。带 tools 也走这条。
+		// 拒答重放不在这条路上做（重放会让服务端会话前缀对不上）。
 		text, toolCalls, res, err = callGeminiConv(messages, modelCfg, tools, req["tool_choice"], onDelta, onReasoning)
 	} else {
-		text, toolCalls, res, err = callGemini(prompt, latest, modelCfg, tools, images, onDelta, onReasoning)
+		text, toolCalls, res, err = callGemini(prompt, latest, modelCfg, tools, images, onDelta, onReasoning, guard)
 	}
 	if err != nil {
 		recordRequest("chat.completions", modelName, prompt, "", res, 502, err.Error(), stream)
@@ -655,13 +707,23 @@ func handleResponses(w http.ResponseWriter, r *http.Request) {
 
 	// onReasoning 传 nil：Responses API 有自己的 reasoning 事件形状，跟 chat 的
 	// reasoning_content 不通用，这条路目前不暴露思考链。
+	//
+	// 拒答闸门同 chat：只在 callGemini 这条路上挂（理由见那边的注释，尤其
+	// useConv 那一条 —— 挂在 conv 上会静默吞掉全部正文）。
+	useConv := useConvPath(len(images), modelCfg.Tool)
+	var guard *refusalGuard
+	if shouldGuardRefusal(tools, modelCfg.Tool, useConv) {
+		guard = newRefusalGuard(onDelta, nil)
+		onDelta = guard.contentCallback()
+	}
+
 	var text string
 	var toolCalls []ToolCall
 	var res *StreamResult
-	if rtCfg().MultiTurn && len(images) == 0 && modelCfg.Tool == 0 {
+	if useConv {
 		text, toolCalls, res, err = callGeminiConv(messages, modelCfg, tools, req["tool_choice"], onDelta, nil)
 	} else {
-		text, toolCalls, res, err = callGemini(prompt, latest, modelCfg, tools, images, onDelta, nil)
+		text, toolCalls, res, err = callGemini(prompt, latest, modelCfg, tools, images, onDelta, nil, guard)
 	}
 	if err != nil {
 		recordRequest("responses", modelName, prompt, "", res, 502, err.Error(), stream)
