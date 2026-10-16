@@ -311,7 +311,7 @@ func (d *deltaTracker) Push(fullText string) string {
 // 自己做。一旦已经吐过内容就不再重试——重试会让客户端收到重复文本。
 func streamGenerate(prompt, latest string, mc ModelConfig,
 	onDelta, onReasoning func(string)) (*StreamResult, error) {
-	return streamGenerateWithFiles(prompt, latest, mc, nil, onDelta, onReasoning)
+	return streamGenerateWithFiles(prompt, latest, mc, nil, onDelta, onReasoning, "")
 }
 
 // fileRef 是一个已上传附件的引用。
@@ -326,8 +326,14 @@ type fileRef struct {
 //
 // 附件填 inner[0][3]，形状 [[[ref, 1], "文件名"], …]。附件只在登录态可用：
 // 匿名能把文件传上去，但对话里一引用就被服务端回 1100。
+//
+// tail 是「追加在正文最末尾」的一段补充说明（拒答重放用，见 toolrefusal.go）。
+// 之所以要单独一个参数而不是让调用方直接拼到 prompt 上，是因为正文可能在
+// prepareContextFile 里被换掉（超长时整段转成 message.txt 附件，本地 prompt 被替换成一句
+// 指路说明）；拼在调用方那一侧的话，说明会跟着原文一起被塞进附件，模型看到的位置就不在
+// 附近了。放这里能保证它**始终是最后一个字节**，无论走不走附件路径，也无论是否被预算检查拦下。
 func streamGenerateWithFiles(prompt, latest string, mc ModelConfig, pending []pendingUpload,
-	onDelta, onReasoning func(string)) (*StreamResult, error) {
+	onDelta, onReasoning func(string), tail string) (*StreamResult, error) {
 	var files []fileRef
 
 	// 先挑号，再按它上次绑的出口挑代理 —— 同一个账号要尽量固定从同一个 IP 出去，
@@ -474,13 +480,22 @@ func streamGenerateWithFiles(prompt, latest string, mc ModelConfig, pending []pe
 
 	// prompt 超长时转成文本附件。要等挑完号和出口才能做：上传要 cookie，
 	// 而且必须走跟正式请求同一个出口。
+	//
+	// 预算里先扣掉 tail 的长度：tail 是必须留在最后、不能进附件的一段（见函数头注释），
+	// 所以附件转换要在「正文 + tail」这一整个总量的口径上判，否则一个刚好卡在预算下沿的
+	// 请求会在第一次成功、重放时因为多出这几百字节而报 PromptTooLongError。
 	budget := rtCfg().MaxPromptBytes
-	if p, f, used, ferr := prepareContextFile(prompt, latest, budget, cookieStr, proxyURL); ferr != nil {
+	attachBudget := budget
+	if tail != "" && budget > 0 {
+		attachBudget = budget - len(tail)
+	}
+	if p, f, used, ferr := prepareContextFile(prompt, latest, attachBudget, cookieStr, proxyURL); ferr != nil {
 		return attrib(ferr)
 	} else if used {
 		prompt = p
 		files = append(files, f...)
 	}
+	prompt += tail
 	if budget > 0 && len(prompt) > budget {
 		return attrib(&PromptTooLongError{
 			Bytes: len(prompt), Budget: budget, HasCookie: cookieStr != "",

@@ -52,6 +52,9 @@ type Config struct {
 	// RPC）。只登录态有意义（匿名本就不落账号）。与 multi_turn 冲突：multi_turn 开着时不发，
 	// 见 temporaryChatEligible。默认 false。
 	TemporaryChat bool `json:"temporary_chat"`
+	// 工具调用被「能力拒答」吞掉时（正文在推脱、一个 tool_call 都没吐）就地重放一次。
+	// 默认 **true**：这是带工具请求最常见的失败形态，重放是唯一实测有效的手段。见 toolrefusal.go。
+	ToolRefusalRetry bool `json:"tool_refusal_retry"`
 }
 
 var (
@@ -94,6 +97,7 @@ func defaultConfig() Config {
 		AutoDeleteConversation: false,
 		AnonFirst:              false,
 		TemporaryChat:          false,
+		ToolRefusalRetry:       true,
 	}
 }
 

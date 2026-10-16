@@ -105,7 +105,8 @@ func runVideoJob(j *videoJob) {
 		finishVideoJob(j, nil, "", err.Error())
 		return
 	}
-	_, _, res, err := callGemini(j.Prompt, j.Prompt, mc, nil, nil, nil, nil)
+	// tools=nil、guard=nil：视频作业不带工具，"拒答没调工具"这个形态不存在，无需重放。
+	_, _, res, err := callGemini(j.Prompt, j.Prompt, mc, nil, nil, nil, nil, nil)
 	if err != nil {
 		recordRequest("videos", j.Model, j.Prompt, "", res, 502, err.Error(), false)
 		finishVideoJob(j, nil, "", err.Error())

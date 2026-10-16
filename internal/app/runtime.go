@@ -59,6 +59,14 @@ type RuntimeConfig struct {
 	// 取代 auto_delete_conversation（省掉删除 RPC）。只登录态有意义，与 multi_turn 冲突
 	// （multi_turn 开着时不发）。默认 false，见 temporaryChatEligible。
 	TemporaryChat bool `json:"temporary_chat"`
+	// ToolRefusalRetry 决定「模型答了句『我无法访问你的本地文件系统』、一个 tool_call 都
+	// 没吐」时要不要就地重放一次。
+	//
+	// 默认 true：这是带工具请求最常见的失败形态（实测 3.8-flash 3 次里 2 次拒答），
+	// 而重放是唯一能压住它的手段 —— 措辞改了七版，命中率都在 0-2/3 之间抖，没有一版
+	// 稳定。关掉的话行为退回「原样把拒答正文交给客户端」。
+	// 代价是每个拒答请求多花一次上游配额，见 toolrefusal.go 的 refusalMaxRetries。
+	ToolRefusalRetry bool `json:"tool_refusal_retry"`
 }
 
 const runtimeConfigKey = "runtime_config"
@@ -94,6 +102,7 @@ func initRuntimeConfig() {
 		AutoDeleteConversation: cfg.AutoDeleteConversation,
 		AnonFirst:              cfg.AnonFirst,
 		TemporaryChat:          cfg.TemporaryChat,
+		ToolRefusalRetry:       cfg.ToolRefusalRetry,
 	}
 	if raw := kvGet(runtimeConfigKey); raw != "" {
 		saved := base
