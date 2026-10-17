@@ -778,6 +778,26 @@ func extractUpstreamModel(raw string) string {
 	return m[len(m)-1][1]
 }
 
+// servedModelDowngraded 报告「请求的是高级模型、上游实际用 Flash-Lite 应答」。
+//
+// 这不是理论风险，是实测撞到的：付费号把每日模型配额用完后，Google **不报错**，而是把
+// 整个账号的模型选择器降成 Flash-Lite 继续应答（2026-10-17 实测，真浏览器里选择器也只剩
+// Flash-Lite）。请求侧看一切正常 —— 200、正文流畅、token 照常计，唯一的痕迹是响应帧
+// [42] 里的模型名变了。不加检测的话，用户以为在用 Argon/Pro，实际质量已经掉了。
+//
+// 只对「真高级模型」报：modelNeedsLogin 且非媒体（生图/生乐/视频的作业管线内部本来就会
+// 落到 flash 系模型上出文本段，响应帧里出现 Flash-Lite 是正常的，不能算降级）。
+// Flash-Lite 自己请求 Lite 不算降级；匿名被降级同样会在这里被抓住。
+func servedModelDowngraded(mc ModelConfig, served string) bool {
+	if served == "" || mc.Tool != 0 {
+		return false
+	}
+	if !modelNeedsLogin(mc) {
+		return false
+	}
+	return strings.Contains(served, "Flash-Lite")
+}
+
 // buildModelHeader 拼 x-goog-ext-525001261-jspb，形状逐槽取自抓包：
 //
 //	[1,null,null,null,"<hex>",null,null,0,[4,5,6,8],null,null,1,null,null,<mode>,<think>,"<uuid>"]

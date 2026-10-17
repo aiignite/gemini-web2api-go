@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-const Version = "4.23.0"
+const Version = "4.23.1"
 
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	body, _ := json.Marshal(data)
@@ -424,8 +424,29 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		if len(toolCalls) > 0 {
 			sse.SendToolCalls(toolCalls)
 		}
+		// 降级检测（流式）：配额用完后 Google 静默降成 Flash-Lite，这里把实际模型
+		// 放进收尾帧的 system_fingerprint，同时打日志。详见非流式分支的同款注释。
+		if res != nil {
+			sse.ServedModel = res.UpstreamModel
+			if servedModelDowngraded(modelCfg, res.UpstreamModel) {
+				logf("[model-downgrade] 请求 %s 但上游实际用 %q 应答 —— 账号每日配额大概率已用完，Google 降级为 Flash-Lite（次日窗口重置后自动恢复）",
+					modelName, res.UpstreamModel)
+			}
+		}
 		sse.Finish(finish, usage)
 		return
+	}
+
+	// 降级检测：付费号每日配额用完后 Google 会把账号静默降成 Flash-Lite 继续应答
+	// （200、正文流畅，唯一痕迹是响应帧 [42] 的模型名）。不提醒的话用户以为在用
+	// Argon/Pro，实际质量已经掉了还查不出原因。日志留痕 + system_fingerprint 暴露。
+	var servedModel string
+	if res != nil {
+		if servedModelDowngraded(modelCfg, res.UpstreamModel) {
+			logf("[model-downgrade] 请求 %s 但上游实际用 %q 应答 —— 账号每日配额大概率已用完，Google 降级为 Flash-Lite（次日窗口重置后自动恢复）",
+				modelName, res.UpstreamModel)
+		}
+		servedModel = res.UpstreamModel
 	}
 
 	writeJSON(w, 200, map[string]interface{}{
@@ -433,6 +454,10 @@ func handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		"object":  "chat.completion",
 		"created": created,
 		"model":   modelName,
+		// OpenAI 本来就有这个字段，正好拿来放「服务端实际用的模型显示名」：
+		// 请求 gemini-4-argon、被降级成 Flash-Lite 时，客户端在这就能看出来，
+		// 不用翻内核日志。取不到时留空（OpenAI 也是可空字段）。
+		"system_fingerprint": servedModel,
 		"choices": []map[string]interface{}{{
 			"index":         0,
 			"message":       msg,

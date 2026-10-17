@@ -110,3 +110,33 @@ func TestToolRefusalRetryIsInAdminUIGroups(t *testing.T) {
 		t.Fatal("admin_ui/index.html 的 RT_GROUPS 里没有 tool_refusal_retry —— 面板上不会出现这个开关")
 	}
 }
+
+// 降级检测：付费号每日配额用完后 Google 静默把账号降成 Flash-Lite 继续应答
+//（200、无报错，实测 2026-10-17）。只有「请求的是高级模型」才算降级 ——
+// Lite 自己、以及生图/生乐/视频管线内部落 flash 出文本段，都不能算。
+func TestServedModelDowngraded(t *testing.T) {
+	argon := Models["gemini-4-argon"]
+	flash := Models["gemini-3.8-flash"]
+	lite := Models["gemini-3.5-flash-lite"]
+	image := Models["gemini-image"]
+
+	cases := []struct {
+		mc    ModelConfig
+		served string
+		want  bool
+		note  string
+	}{
+		{argon, "3.5 Flash-Lite", true, "argon 被降到 lite：必须报"},
+		{flash, "3.5 Flash-Lite", true, "3.8-flash 被降到 lite：必须报"},
+		{flash, "3.8 Flash", false, "正常服务：不报"},
+		{argon, "4 Argon", false, "正常服务：不报"},
+		{argon, "", false, "取不到模型名：不误报"},
+		{lite, "3.5 Flash-Lite", false, "请求的就是 lite：不算降级"},
+		{image, "3.5 Flash-Lite", false, "媒体管线内部落 flash：不算降级"},
+	}
+	for _, c := range cases {
+		if got := servedModelDowngraded(c.mc, c.served); got != c.want {
+			t.Errorf("%s: servedModelDowngraded(%s, %q) = %v, 要 %v", c.note, c.mc.Desc[:12], c.served, got, c.want)
+		}
+	}
+}

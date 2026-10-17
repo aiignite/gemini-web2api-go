@@ -18,6 +18,10 @@ type sseWriter struct {
 	created int64
 	model   string
 	started bool
+	// ServedModel 是上游在响应帧 [42] 里自报的实际模型显示名。Finish 时塞进收尾帧的
+	// system_fingerprint：付费号配额用完后 Google 会静默把账号降成 Flash-Lite 继续应答
+	// （200、无任何报错），客户端只能靠这个字段发现「要的 Argon、来的 Lite」。
+	ServedModel string
 }
 
 func newSSEWriter(w http.ResponseWriter, id string, created int64, model string) *sseWriter {
@@ -115,6 +119,9 @@ func (s *sseWriter) Finish(reason string, usage map[string]int) {
 			"created": s.created, "model": s.model,
 			"choices": []map[string]interface{}{},
 			"usage":   usage,
+		}
+		if s.ServedModel != "" {
+			c["system_fingerprint"] = s.ServedModel
 		}
 		b, _ := json.Marshal(c)
 		fmt.Fprintf(s.w, "data: %s\n\n", b)
