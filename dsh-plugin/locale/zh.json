@@ -1,0 +1,7 @@
+{
+  "gemini-web2api": {
+    "name": "Gemini 网页端",
+    "description": "把 gemini.google.com 反代成模型",
+    "status": "后端连接状态"
+  }
+}

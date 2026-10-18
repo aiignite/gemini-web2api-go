@@ -15,6 +15,15 @@ tmp_*
 # ─── Docker ───────────────
 .env
 
+# ─── Local deployment config ──
+# config.json 是本机实际运行配置（代理地址、管理员 token 等），
+# 仓库里只保留 config.example.json 作模板。
+config.json
+
+# ─── DSH plugin local secrets ──
+# dsh-plugin/cordis.patch.yml 里填了真实密钥的副本不入库，模板随仓库发布。
+dsh-plugin/cordis.local.yml
+
 # ─── IDE ──────────────────
 .vscode/
 .idea/

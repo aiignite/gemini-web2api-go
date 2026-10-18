@@ -1,0 +1,7 @@
+{
+  "gemini-web2api": {
+    "name": "Gemini Web",
+    "description": "Reverse-proxies gemini.google.com into a model",
+    "status": "Backend connection status"
+  }
+}

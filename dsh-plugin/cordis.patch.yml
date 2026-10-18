@@ -1,0 +1,25 @@
+# Gemini 网页端桥：把本机 gemini-web2api-go 的 OpenAI 兼容接口注册成原生
+# LlmAdapter。
+#
+# 该后端直连 gemini.google.com 不通时，必须靠它自己的代理池出网——它
+# **不读 HTTPS_PROXY 环境变量**，所以代理配在 config.json 的 `proxy` 字段
+# （启动时播种进代理池），不是这里。
+#
+# ⚠️ 本文件是**模板**，不要提交真实密钥。
+#    apiKey / adminToken 请在本机复制一份再填，仓库里这份只留占位符：
+#      后端 API key   → 面板「设置」页，或 GET /admin/api/apikey
+#      后端 admin token → 启动参数 --admin-token，或管理面板登录框
+#
+# - config.baseUrl: 后端地址，默认 http://127.0.0.1:8083
+# - config.apiKey : 后端的 sk-gemini-… 密钥
+# - config.adminToken: 后端管理员 token，浏览器登录靠它把 cookie 写进 Cookie 池
+# - config.models  : 可选。留空则完全以后端 /v1/models 为准（推荐）——后端按
+#                    cookie 状态决定放行哪些模型，匿名 2 个、登录后 17 个，
+#                    在这里写死会让登录后模型选择器少一大半。
+- insert:
+    - id: gemini-web2api
+      name: dsh-gemini-web2api
+      config:
+        baseUrl: 'http://127.0.0.1:8083'
+        apiKey: 'REPLACE_WITH_YOUR_BACKEND_API_KEY'
+        adminToken: 'REPLACE_WITH_YOUR_ADMIN_TOKEN'
