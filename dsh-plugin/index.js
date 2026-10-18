@@ -169,14 +169,52 @@ class GeminiWeb2ApiAdapter {
       return
     }
 
-    let result
+    // 逐帧转发：后端出一帧就往前端推一帧。攒完再发会让整个生成期间空白。
+    let nextIndex = 0
+    let reasonIndex = -1
+    let textIndex = -1
+    let reasoning = ''
+    let content = ''
+    let usage = null
+    let servedModel = entry.id
+
     try {
-      result = await this.#client.chat({
+      for await (const event of this.#client.stream({
         model: entry.id,
         messages,
         signal: options.signal,
-      })
+      })) {
+        if (event.type === 'reasoning') {
+          if (reasonIndex < 0) {
+            reasonIndex = nextIndex
+            nextIndex += 1
+            yield { type: 'block-start', index: reasonIndex, blockType: 'reasoning' }
+          }
+          reasoning += event.text
+          yield { type: 'reasoning-delta', index: reasonIndex, text: event.text }
+        } else if (event.type === 'delta') {
+          if (textIndex < 0) {
+            textIndex = nextIndex
+            nextIndex += 1
+            yield { type: 'block-start', index: textIndex, blockType: 'text' }
+          }
+          content += event.text
+          yield { type: 'text-delta', index: textIndex, text: event.text }
+        } else if (event.type === 'usage') {
+          usage = event.usage
+        } else if (event.type === 'done') {
+          usage = event.usage ?? usage
+          if (event.model) servedModel = event.model
+        }
+      }
     } catch (error) {
+      // 已经吐出去的内容不能收回，先把开着的块闭合，再报错。
+      if (reasonIndex >= 0) {
+        yield { type: 'block-end', index: reasonIndex, block: { type: 'reasoning', text: reasoning } }
+      }
+      if (textIndex >= 0) {
+        yield { type: 'block-end', index: textIndex, block: { type: 'text', text: content } }
+      }
       if (options.signal?.aborted) {
         yield { type: 'finish', reason: { kind: 'aborted', failure: { message: '已取消', code: 'ABORTED' } } }
         return
@@ -188,30 +226,19 @@ class GeminiWeb2ApiAdapter {
     }
 
     this.#status.lastError = ''
-    this.#status.servedModel = result.model
+    this.#status.servedModel = servedModel
     this.#status.lastUsedAt = new Date().toISOString()
 
-    let index = 0
-    // 思考链：后端把 Pro 的推理过程放在 reasoning_content，单独成一个块，
-    // 客户端可折叠展示。
-    if (result.reasoning) {
-      yield { type: 'block-start', index, blockType: 'reasoning' }
-      yield { type: 'reasoning-delta', index, text: result.reasoning }
-      yield { type: 'block-end', index, block: { type: 'reasoning', text: result.reasoning } }
-      index += 1
+    if (reasonIndex >= 0) {
+      yield { type: 'block-end', index: reasonIndex, block: { type: 'reasoning', text: reasoning } }
     }
-
-    if (result.content) {
-      yield { type: 'block-start', index, blockType: 'text' }
-      yield { type: 'text-delta', index, text: result.content }
-      yield { type: 'block-end', index, block: { type: 'text', text: result.content } }
-      index += 1
-    } else if (!result.reasoning) {
+    if (textIndex >= 0) {
+      yield { type: 'block-end', index: textIndex, block: { type: 'text', text: content } }
+    } else if (reasonIndex < 0) {
       yield* this.#fail('后端返回了空回复（可能是瞬时上游拒绝，重发一次通常就好）', 'EMPTY_RESPONSE')
       return
     }
 
-    const usage = result.usage
     if (usage && Number.isFinite(usage.prompt_tokens + usage.completion_tokens)) {
       yield {
         type: 'usage',

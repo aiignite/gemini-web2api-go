@@ -13,37 +13,30 @@
 const DEFAULT_TIMEOUT_MS = 200_000
 
 /**
- * 把 ReadableStream 按行喂给 onLine。
+ * 把 ReadableStream 逐行产出（异步生成器）。
  *
- * `onLine` 返回 false 时停止消费（用于 `[DONE]` 后立即收尾）。
+ * 按字节喂入、按 UTF-8 边界切行：Gemini 网页端吐中文时一个 chunk 常在多字节
+ * 字符中间断开，直接 toString 会产生乱码。
  *
  * @param {ReadableStream<Uint8Array>} stream
- * @param {(line: string) => boolean|void} onLine
+ * @returns {AsyncGenerator<string>}
  */
-async function forEachLine(stream, onLine) {
+async function* linesOf(stream) {
   const decoder = new TextDecoder('utf-8')
   let buffer = ''
-  let open = true
 
   for await (const chunk of stream) {
     buffer += decoder.decode(chunk, { stream: true })
     let index
     while ((index = buffer.indexOf('\n')) !== -1) {
-      const line = buffer.slice(0, index).replace(/\r$/, '')
+      yield buffer.slice(0, index).replace(/\r$/, '')
       buffer = buffer.slice(index + 1)
-      if (line.length > 0 && onLine(line) === false) {
-        open = false
-        break
-      }
     }
-    if (!open) break
   }
 
-  if (open) {
-    const tail = buffer + decoder.decode()
-    const line = tail.replace(/\r$/, '')
-    if (line.length > 0) onLine(line)
-  }
+  // 流结束时把解码器残留字节冲出来，避免最后一帧被吞。
+  const tail = (buffer + decoder.decode()).replace(/\r$/, '')
+  if (tail.length > 0) yield tail
 }
 
 /** 后端返回的错误体 → 带 code 的 Error。 */
@@ -109,18 +102,23 @@ export class GeminiWeb2ApiClient {
   }
 
   /**
-   * 流式对话。
+   * 流式对话：后端每吐一帧就立刻 yield 出去，调用方可以边收边渲染。
    *
-   * 后端对普通 chat 是真流式（上游每出一帧就转发），所以这里逐帧转成 DSH
-   * 的 block 事件；带 tools 的请求后端会退化成收完再发，这对我们无影响。
+   * 后端对普通 chat 是真流式（上游每出一帧就转发），所以这里不要攒完再返回——
+   * 攒完会让用户在整个生成期间看不到任何字。
+   *
+   * 事件形状：
+   *   { type:'delta',     text }   正文增量
+   *   { type:'reasoning', text }   思考链增量
+   *   { type:'usage',     usage }  用量（后端在 finish 后补的一帧）
+   *   { type:'done', model, usage } 结束
    *
    * @param {object} options
    * @param {string} options.model
    * @param {Array<{role:string, content:string, tool_call_id?:string}>} options.messages
    * @param {AbortSignal} [options.signal]
-   * @returns {Promise<{content:string, reasoning:string, usage:object|null, model:string}>}
    */
-  async chat({ model, messages, signal }) {
+  async *stream({ model, messages, signal }) {
     const controller = new AbortController()
     const onAbort = () => controller.abort(signal?.reason)
     if (signal) {
@@ -129,11 +127,6 @@ export class GeminiWeb2ApiClient {
     }
     const timer = setTimeout(() => controller.abort(new Error('请求超时')), this.timeoutMs)
     timer.unref?.()
-
-    let content = ''
-    let reasoning = ''
-    let usage = null
-    let servedModel = model
 
     try {
       const response = await fetch(`${this.baseUrl}/v1/chat/completions`, {
@@ -153,33 +146,68 @@ export class GeminiWeb2ApiClient {
       if (!response.ok) throw backendError(response.status, await response.text())
       if (!response.body) throw new Error('后端没有返回可读流')
 
-      await forEachLine(response.body, rawLine => {
-        if (!rawLine.startsWith('data:')) return true
+      let servedModel = model
+      let usage = null
+
+      for await (const rawLine of linesOf(response.body)) {
+        if (!rawLine.startsWith('data:')) continue
         const data = rawLine.slice(5).trim()
-        if (data === '' || data === '[DONE]') return data === '[DONE]' ? false : true
+        if (data === '') continue
+        if (data === '[DONE]') break
 
         let frame
         try {
           frame = JSON.parse(data)
         } catch {
-          return true // 半帧或心跳，忽略
+          continue // 半帧或心跳，忽略
         }
 
         if (typeof frame?.model === 'string' && frame.model) servedModel = frame.model
 
         const delta = frame?.choices?.[0]?.delta ?? frame?.choices?.[0]?.message
-        if (typeof delta?.content === 'string') content += delta.content
-        if (typeof delta?.reasoning_content === 'string') reasoning += delta.reasoning_content
+        if (typeof delta?.reasoning_content === 'string' && delta.reasoning_content) {
+          yield { type: 'reasoning', text: delta.reasoning_content }
+        }
+        if (typeof delta?.content === 'string' && delta.content) {
+          yield { type: 'delta', text: delta.content }
+        }
 
         // usage 帧的 choices 是空数组，所以 delta 取不到，必须单独读 usage。
-        if (frame?.usage && Number.isFinite(frame.usage.total_tokens ?? Infinity)) usage = frame.usage
-        return true
-      })
+        if (frame?.usage && Number.isFinite(frame.usage.total_tokens ?? Infinity)) {
+          usage = frame.usage
+          yield { type: 'usage', usage }
+        }
+      }
+
+      yield { type: 'done', model: servedModel, usage }
     } finally {
       clearTimeout(timer)
       if (signal) signal.removeEventListener('abort', onAbort)
     }
+  }
 
-    return { content, reasoning, usage, model: servedModel }
+  /**
+   * 收完整个流的便捷封装。
+   *
+   * 仅给不关心增量时序的调用方用（健康探测、一次性诊断）。正常对话请直接用
+   * stream()，否则又退化成"等全部生成完才显示"。
+   */
+  async chat(options) {
+    let content = ''
+    let reasoning = ''
+    let usage = null
+    let model = options.model
+
+    for await (const event of this.stream(options)) {
+      if (event.type === 'delta') content += event.text
+      else if (event.type === 'reasoning') reasoning += event.text
+      else if (event.type === 'usage') usage = event.usage
+      else if (event.type === 'done') {
+        usage = event.usage ?? usage
+        model = event.model
+      }
+    }
+
+    return { content, reasoning, usage, model }
   }
 }
