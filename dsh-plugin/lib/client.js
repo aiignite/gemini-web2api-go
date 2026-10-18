@@ -186,28 +186,7 @@ export class GeminiWeb2ApiClient {
     }
   }
 
-  /**
-   * 收完整个流的便捷封装。
-   *
-   * 仅给不关心增量时序的调用方用（健康探测、一次性诊断）。正常对话请直接用
-   * stream()，否则又退化成"等全部生成完才显示"。
-   */
-  async chat(options) {
-    let content = ''
-    let reasoning = ''
-    let usage = null
-    let model = options.model
-
-    for await (const event of this.stream(options)) {
-      if (event.type === 'delta') content += event.text
-      else if (event.type === 'reasoning') reasoning += event.text
-      else if (event.type === 'usage') usage = event.usage
-      else if (event.type === 'done') {
-        usage = event.usage ?? usage
-        model = event.model
-      }
-    }
-
-    return { content, reasoning, usage, model }
-  }
+  // 这里刻意不提供"收完整个流再返回"的便捷方法：那种封装一旦被顺手用上，
+  // 输出就会退化成等全部生成完才显示（本插件踩过一次，首字从 2.7s 变成 5.4s）。
+  // 需要完整文本的调用方请自己 for await 累加 stream() 的事件。
 }
