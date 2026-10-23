@@ -2,6 +2,26 @@
 
 本项目遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## 4.23.4
+
+### 修复
+
+- **视频生成（`gemini-video` / `/v1/videos`）端到端打通**。这条路径以前**从来没成功过**
+  （历史记录里全是 502），2026-10-23 定位并修掉两个叠加的根因：
+  - **上游好好地接了 Veo 任务，却被判成「上游空响应」**。视频提交的确认帧结构跟文本
+    模型不一样（inner 只有 3 段，正文在 `"7"` 字段里，还带 `"44":true` 标记），而
+    `hasContentFrame` 取的是 `inner[4]`（文本模型的正文位置）—— 媒体模型**必然误判**。
+    上游明明回了「I'm generating your video. This could take a few minutes…」加
+    `video_generation` 组件，内核却判成空响应、重试 3 次再报 502。现在媒体模型改用
+    「有 wrb.fr 帧」作判据（被拒绝的响应只回一个结束帧、没有 wrb.fr，仍然能识别）。
+  - **下载回来的不是 MP4，是 protobuf 信封**。视频下载（contribution…usercontent）
+    返回的是一层 protobuf 包装：`field1{ field1:"video/mp4", field2:<长度前缀+MP4> }`，
+    实测 4.9MB 的响应里 MP4 只占 4907343 字节，前面是 prompt/摘要、尾部还挂着信封
+    字段。不剥的话客户端拿到的是 `file` 识别为 "data" 的坏文件。现在按 MP4 box 结构
+    （必须同时见到 ftyp/moov/mdat）剥出真实字节，mime 也一并修正。
+  - 实测：`/v1/videos` 建任务 → 160s completed → `/v1/videos/{id}/content` 返回
+    `video/mp4`、h264 1280×720 + aac、10.0s。
+
 ## 4.23.3
 
 ### 修复

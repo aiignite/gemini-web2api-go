@@ -3,6 +3,7 @@ package app
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -206,6 +207,84 @@ func imageFullResURL(u string) string {
 	return u + "=s0"
 }
 
+// mediaMimes 是媒体下载里可能出现的 mime 字符串，用来从 protobuf 信封里取回真实类型。
+var mediaMimes = []string{"video/mp4", "audio/mpeg", "audio/mp3", "image/png", "image/jpeg", "image/webp"}
+
+// unwrapMediaEnvelope 剥掉 Google 媒体下载的 protobuf 信封，返回真实字节和 mime。
+//
+// 2026-10-23 实测：视频下载（contribution.usercontent.google.com/download）返回的**不是
+// MP4 本身**，而是一层 protobuf 包装：
+//
+//	顶层 field1 → 内层 field1{ field1:"video/mp4", field2:<4字节长度前缀 + MP4 数据> }
+//
+// 实测 4.9MB 的响应里，MP4 只占 4907343 字节，前面是 prompt/摘要/mime，尾部还挂着
+// protobuf 的其他字段。不剥的话客户端拿到的是坏文件（file 识别成 "data"，播放器打不开）。
+//
+// 做法：找 "ftyp" 的位置（它的前 4 字节是 box size，也就是 box 起点），按 MP4 box
+// 结构遍历到越界为止 —— 越界处正好是信封尾部 —— 取走完整的一段。必须同时见到
+// ftyp/moov/mdat 才认，否则宁可不剥。
+func unwrapMediaEnvelope(data []byte) ([]byte, string) {
+	if len(data) >= 4 && string(data[:4]) == "ftyp" {
+		return data, ""
+	}
+	mime := ""
+	for _, m := range mediaMimes {
+		if bytes.Contains(data, []byte(m)) {
+			mime = m
+			break
+		}
+	}
+	for i := 4; i+4 <= len(data); i++ {
+		if string(data[i:i+4]) != "ftyp" {
+			continue
+		}
+		if end, ok := mp4Span(data, i-4); ok {
+			return data[i-4 : end], mime
+		}
+	}
+	return data, ""
+}
+
+// mp4Span 从 start 开始按 MP4 box 结构遍历，返回有效覆盖的结束位置。
+//
+// 遇到越界/非法 size 就停 —— protobuf 信封的尾部正好在这里，所以 mdat 之后的
+// 信封字节不会被算进 MP4。必须见到 ftyp+moov+mdat 才认这段是完整视频。
+func mp4Span(b []byte, start int) (int, bool) {
+	i := start
+	boxes := 0
+	sawMoov, sawMdat := false, false
+	for i+8 <= len(b) {
+		size := int(binary.BigEndian.Uint32(b[i : i+4]))
+		typ := string(b[i+4 : i+8])
+		hdr := 8
+		switch size {
+		case 1: // 64 位 largesize
+			if i+16 > len(b) {
+				return 0, false
+			}
+			size = int(binary.BigEndian.Uint64(b[i+8 : i+16]))
+			hdr = 16
+		case 0: // 延伸到文件末尾
+			size = len(b) - i
+		}
+		if size < hdr || i+size > len(b) {
+			break
+		}
+		switch typ {
+		case "moov":
+			sawMoov = true
+		case "mdat":
+			sawMdat = true
+		}
+		i += size
+		boxes++
+	}
+	if boxes < 3 || !sawMoov || !sawMdat || i <= start {
+		return 0, false
+	}
+	return i, true
+}
+
 // fetchDownloadArtifacts 取回音乐/视频：轮询 hNvQHb 等到 response_data 下载链，再下。
 // gg-dl（lh3）和 temp_data 那两种链是预览用的，只有 response_data 那条能下到真字节。
 func fetchDownloadArtifacts(cid, cookie, sapisid, xsrf, proxyURL, defaultMime string,
@@ -243,6 +322,14 @@ func fetchDownloadArtifacts(cid, cookie, sapisid, xsrf, proxyURL, defaultMime st
 		mime, data, err := downloadBytes(u, cookie, proxyURL, defaultMime)
 		if err != nil {
 			return arts, err
+		}
+		// 视频下载回来的是 protobuf 信封（见 unwrapMediaEnvelope），剥掉才是 MP4。
+		// 不剥的话客户端拿到的是 4.9MB 的坏文件。
+		if out, m := unwrapMediaEnvelope(data); len(out) != len(data) || m != "" {
+			data = out
+			if m != "" {
+				mime = m
+			}
 		}
 		if !artifactSeen(arts, data) {
 			arts = append(arts, MediaArtifact{Mime: mime, Data: data})

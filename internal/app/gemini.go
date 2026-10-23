@@ -697,7 +697,7 @@ func streamGenerateWithFiles(prompt, latest string, mc ModelConfig, pending []pe
 		//
 		// 判据是**有没有内容帧**，不是 BardErrorInfo：正常响应的结束帧里也带错误码
 		// （1096 = 会话未持久化），拿它判错会把每个正常响应都判成失败。
-		if !hasContentFrame(string(raw)) {
+		if !hasContentFrame(string(raw)) && !hasMediaAck(string(raw)) {
 			lastErr = fmt.Errorf("upstream returned no content frame (raw %d bytes)", len(raw))
 			if pickedOK {
 				// 记进代理健康度：1155 跟出口质量强相关（干净出口 60+ 次 0 发生，
@@ -1049,6 +1049,30 @@ func textsInLine(line string) []string {
 // 故意不复用 extractResponseText：那个会先 cleanGeminiText 掉代码产物，一个纯代码
 // 产物的回复在它眼里是空的，但那明明是上游正常出了内容。这里只问"有没有帧"，
 // 判断的是链路成没成功，不是内容合不合用。
+// hasMediaAck 判「媒体模型的上游响应里有实质内容」，供 hasContentFrame 兜底。
+//
+// 媒体的帧结构跟文本模型不一样：视频提交的确认帧是
+//
+//	[["wrb.fr",null,"[null,[\"c_…\",\"r_…\"],{\"7\":[\"I'm generating your video…\",
+//	  [\"video_generation\",…]],\"44\":true}]"]]
+//
+// —— inner 只有 3 段、正文在 "7" 字段里，而 textsInLine 取的是 inner[4]（文本模型的
+// 正文位置），所以 hasContentFrame 对媒体**必然误判**成「上游空响应」。2026-10-23 实测：
+// 上游好好地接了 Veo 任务并回了「生成中，请稍后回来看」，内核却判成空响应、重试 3 次
+// 再报 502 —— 一次成功的提交被当成失败。
+//
+// 媒体的判据换成「有 wrb.fr 帧」：被拒绝的响应只回一个结束帧（["e",7,…]）、没有 wrb.fr，
+// 所以仍然能被识别出来（实测被拒时 raw 仅 216 字节）。
+func hasMediaAck(raw string) bool {
+	for _, line := range strings.Split(raw, "\n") {
+		if strings.Contains(line, `"wrb.fr"`) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasContentFrame 判断响应里有没有正文帧（文本模型用）。
 func hasContentFrame(raw string) bool {
 	for _, line := range strings.Split(raw, "\n") {
 		if len(textsInLine(line)) > 0 || reasoningInLine(line) != "" {
