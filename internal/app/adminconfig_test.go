@@ -140,3 +140,28 @@ func TestServedModelDowngraded(t *testing.T) {
 		}
 	}
 }
+
+// Argon 的默认思考档必须是「中等」（不开思考），高档只能显式用 -thinking 选。
+//
+// 2026-10-17 曾经把默认改成 High（inner[80]=2），结果 Argon 延迟从 14-30s 变成
+// 3.7s~477s 的剧烈波动，慢的那些撞超时变成 502（2026-10-23 实测）。这条断言把
+// 「默认档」钉死，防止再次被顺手改掉。
+func TestArgonDefaultThinkingTier(t *testing.T) {
+	plain, ok := Models["gemini-4-argon"]
+	if !ok {
+		t.Fatal("没有 gemini-4-argon")
+	}
+	if plain.Thinking {
+		t.Error("gemini-4-argon 默认开了高档思考 —— 会把延迟推到几百秒并撞超时；高档请用 gemini-4-argon-thinking")
+	}
+	high, ok := Models["gemini-4-argon-thinking"]
+	if !ok {
+		t.Fatal("没有 gemini-4-argon-thinking")
+	}
+	if !high.Thinking {
+		t.Error("gemini-4-argon-thinking 应该开高档思考")
+	}
+	if plain.HexID != high.HexID || plain.Mode != high.Mode {
+		t.Error("Argon 两档的模型选择（hex/mode）应该一致，只差思考档")
+	}
+}

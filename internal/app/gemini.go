@@ -85,11 +85,11 @@ var Models = map[string]ModelConfig{
 	"gemini-3.7-flash": {HexID: hexFlash38, Mode: 1, Desc: "alias of gemini-3.8-flash (same hex; Google renamed 3.7→3.8)"},
 	// 4 Argon（#35）：Mode=8 是真正的选择开关（见 hexArgon4 注释）。付费/Ultra 号专属，
 	// 免费号发它会被静默降级成 3.5 Flash-Lite，所以 gate 成要 cookie（modelNeedsLogin）。
-	// Thinking 默认开（inner[80]=2）：网页端 Argon 的思考等级有 低点/中等/高点 三档
-	// （2026-10-17 截图），默认勾「中等」，而 -thinking（=2）实测回报 "4 Argon High"、
-	// 对应「高点/超级详尽」。本地默认用最高档 —— 反正是同一档配额，宁要好质量；
-	// 要低档用 gemini-4-argon-thinking 之外的匿名……没有低档模型，需要时再加。
-	"gemini-4-argon": {HexID: hexArgon4, Mode: 8, Thinking: true, Desc: "4 Argon (complex tasks) with High reasoning tier by default; needs a signed-in PAID/Ultra Google account (free accounts get downgraded to 3.5 Flash-Lite)"},
+	// 思考档默认**不开**（inner[80]=1，网页端「中等」档）：Argon 开高档（inner[80]=2，
+	// 回报 "4 Argon High"）实测延迟是 3.7s~477s 的剧烈波动（2026-10-23），慢的那些会
+	// 撞超时变成 502；不开高档稳定在 14-30s、8/8 命中。要高档请显式用
+	// gemini-4-argon-thinking。
+	"gemini-4-argon": {HexID: hexArgon4, Mode: 8, Desc: "4 Argon (complex tasks); needs a signed-in PAID/Ultra Google account (free accounts get downgraded to 3.5 Flash-Lite)"},
 
 	// 扩展思考版。inner[80]=2 跟模型 hex 正交，都能开；但只在登录态生效，
 	// 所以跟 3.1 Pro 一样在没 cookie 时不暴露。

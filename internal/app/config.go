@@ -11,6 +11,10 @@ type Config struct {
 	Host           string `json:"host"`
 	RetryAttempts  int    `json:"retry_attempts"`
 	RetryDelaySec  int    `json:"retry_delay_sec"`
+	// RequestTimeout 是单次上游请求的超时秒数。默认 300：4 Argon 开高档思考
+	// （inner[80]=2）实测能跑到 210-477 秒，180 秒会把慢请求砍成 502
+	// （2026-10-23 实测：同一档位 3.7s~477s 剧烈波动，砍掉的正是慢的那些）。
+	// 合法范围 5-600（validateRuntimeConfig 的 rangeCheck）。
 	RequestTimeout int    `json:"request_timeout_sec"`
 	GeminiBL       string `json:"gemini_bl"`
 	DefaultModel   string `json:"default_model"`
@@ -68,7 +72,7 @@ func defaultConfig() Config {
 		Host:           "0.0.0.0",
 		RetryAttempts:  3,
 		RetryDelaySec:  2,
-		RequestTimeout: 180,
+		RequestTimeout: 300,
 		GeminiBL:       "boq_gemini-web-uiserver_20261007.01_p0",
 		DefaultModel:   "gemini-3.6-flash",
 		LogRequests:    true,
